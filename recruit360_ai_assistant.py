@@ -31,6 +31,18 @@ def get_llm():
     return ChatVertexAI(model=MODEL, project=PROJECT, location=LOCATION, temperature=0)
 bq=get_bq(); llm=get_llm()
 
+import time
+def _invoke(prompt, tries=4):
+    """Call Vertex with gentle retry so occasional 429 rate-limits don't reach the user."""
+    for i in range(tries):
+        try:
+            return llm.invoke(prompt)
+        except Exception as e:
+            if "429" in str(e) or "exhausted" in str(e).lower():
+                time.sleep(4*(i+1)); continue
+            raise
+    return llm.invoke(prompt)
+
 ART={}                                   # tools run in threads -> plain dict, bridged to session
 if "art" not in st.session_state: st.session_state["art"]={}
 def _txt(m):
@@ -75,7 +87,7 @@ def query_recruitment_data(question: str) -> str:
     plain-English question. This is the main data tool."""
     _trace("Conversational/Reporting")
     prompt=f"Write ONE BigQuery SELECT (only SQL, no fences) answering the question.\n{SCHEMA}\nQuestion: {question}\nSQL:"
-    sql=re.sub(r"^```(?:sql)?|```$","",_txt(llm.invoke(prompt)),flags=re.I).strip()
+    sql=re.sub(r"^```(?:sql)?|```$","",_txt(_invoke(prompt)),flags=re.I).strip()
     if not _readonly(sql): return f"Blocked (read-only).\n{sql}"
     try: df=bq.query(sql).to_dataframe()
     except Exception as e: return f"Query failed: {e}\nSQL:\n{sql}"
@@ -97,7 +109,7 @@ def visa_fix_it(candidate_id: str) -> str:
     if df.empty: return f"No rejected visa found for {cid} (nothing to remediate)."
     codes=[c for cell in df["rejection_codes"].dropna() for c in str(cell).split(";") if c]
     mapped="\n".join(f"- {c}: {REJECTION_FIXES.get(c,'Refer to embassy guidance.')}" for c in codes)
-    ans=_txt(llm.invoke(
+    ans=_txt(_invoke(
         f"You are a visa remediation assistant. A candidate's visa was rejected with these issues:\n{mapped}\n\n"
         f"Write a clear, numbered remediation checklist a recruiter can act on to fix and re-apply. "
         f"Keep it practical and specific."))
@@ -132,9 +144,15 @@ def get_agent(): return create_agent(model=get_llm(), tools=TOOLS, system_prompt
 agent=get_agent()
 def ask(q):
     ART.clear(); ART["trace"]=[]
-    r=agent.invoke({"messages":[{"role":"user","content":q}]})
-    st.session_state["art"]=dict(ART)
-    return _txt(r["messages"][-1])
+    for i in range(3):
+        try:
+            r=agent.invoke({"messages":[{"role":"user","content":q}]})
+            st.session_state["art"]=dict(ART)
+            return _txt(r["messages"][-1])
+        except Exception as e:
+            if ("429" in str(e) or "exhausted" in str(e).lower()) and i<2:
+                time.sleep(5); continue
+            raise
 
 # ---------------- UI ----------------
 st.markdown("""<style>
