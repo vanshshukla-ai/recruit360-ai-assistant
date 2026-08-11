@@ -1,12 +1,4 @@
-"""
-Recruit360 AI Assistant — GCP Edition
-Follows the presentation's plan: Vertex AI (Gemini) + BigQuery + LangChain.
-One assistant, multiple AI agents (tools):
-  1. Conversational + Reporting  -> text-to-SQL over all Recruit360 data
-  2. Visa Fix-It                 -> reads a candidate's rejection codes -> remediation checklist
-  3. Urgency / Risk Watch        -> flags high-urgency & AWOL-risk candidates
-Data: BigQuery dataset `recruit360`.  Auth: service account in st.secrets (Cloud) or ADC (Colab).
-"""
+
 import os, json, re
 import pandas as pd
 import streamlit as st
