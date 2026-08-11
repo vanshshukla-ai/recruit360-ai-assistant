@@ -1,0 +1,8 @@
+streamlit
+google-cloud-bigquery
+db-dtypes
+pandas
+langchain
+langchain-google-vertexai
+langgraph
+google-cloud-aiplatform
