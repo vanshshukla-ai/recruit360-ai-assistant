@@ -154,27 +154,48 @@ def ask(q):
                 time.sleep(5); continue
             raise
 
-# ---------------- UI ----------------
+# ---------------- UI (light "console" theme — emerald) ----------------
 st.markdown("""<style>
-.stApp{background:linear-gradient(180deg,#0e1117,#131a2b);}
-.hero{padding:18px 26px;border-radius:14px;margin-bottom:8px;color:#fff;
- background:linear-gradient(100deg,#0b1b4d,#6C4FE0 55%,#00c6ff);}
-.hero h1{margin:0;font-size:26px;font-weight:800;} .hero p{margin:3px 0 0;opacity:.92;font-size:14px;}
-.chip{display:inline-block;padding:3px 10px;border-radius:999px;background:rgba(255,255,255,.15);
- color:#fff;font-size:11px;margin-right:6px;}
-.tool{display:inline-block;padding:2px 9px;margin:3px 0;border-radius:8px;background:#1f2740;color:#8ab4f8;
- font-size:12px;border:1px solid #2b3550;}
+.stApp{background:#f4f6f8;}
+section[data-testid="stSidebar"]{background:#0f2f26;}
+section[data-testid="stSidebar"] *{color:#d7efe6 !important;}
+.block-container{padding-top:1.2rem;}
+.topbar{display:flex;align-items:center;gap:14px;background:#ffffff;border:1px solid #e3e8ee;
+  border-left:6px solid #059669;border-radius:12px;padding:14px 20px;margin-bottom:14px;
+  box-shadow:0 2px 10px rgba(16,40,32,.06);}
+.topbar .logo{width:44px;height:44px;border-radius:11px;background:#059669;color:#fff;
+  display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:800;}
+.topbar h1{margin:0;font-size:22px;font-weight:800;color:#0f2f26;letter-spacing:.2px;}
+.topbar p{margin:2px 0 0;font-size:13px;color:#5b6b7b;}
+.badge{display:inline-block;padding:3px 10px;border-radius:6px;background:#ecfdf5;color:#047857;
+  font-size:11px;font-weight:700;margin-right:6px;border:1px solid #a7f3d0;}
+.agent{display:block;padding:9px 12px;margin:6px 0;border-radius:9px;background:#12463a;
+  color:#e6fff6 !important;font-size:13px;font-weight:600;border:1px solid #1c5a49;}
+.stChatMessage{background:#ffffff;border:1px solid #e6ebf0;border-radius:12px;}
+[data-testid="stChatInput"]{border:2px solid #059669 !important;border-radius:10px;}
+.stButton>button{background:#ffffff;color:#0f2f26;border:1px solid #cfe9df;border-radius:9px;
+  text-align:left;font-size:13px;}
+.stButton>button:hover{border-color:#059669;color:#059669;}
+h4{color:#0f2f26;}
 </style>""",unsafe_allow_html=True)
-st.markdown("""<div class="hero"><h1>🤖 Recruit360 AI Assistant</h1>
-<p>One assistant, multiple AI agents — on Vertex AI + BigQuery. Ask anything about candidates, visas, billing, jobs and placements.</p>
-<div style="margin-top:8px"><span class="chip">Vertex AI brain</span><span class="chip">BigQuery</span>
-<span class="chip">LangChain agents</span><span class="chip">Read-only guardrails</span></div></div>""",unsafe_allow_html=True)
+
+st.markdown("""<div class="topbar">
+  <div class="logo">R</div>
+  <div><h1>Recruit360 — AI Assistant</h1>
+  <p>One assistant · multiple AI agents · Vertex AI + BigQuery</p></div>
+  <div style="margin-left:auto">
+    <span class="badge">VERTEX AI</span><span class="badge">BIGQUERY</span>
+    <span class="badge">LANGCHAIN</span><span class="badge">READ-ONLY</span>
+  </div>
+</div>""",unsafe_allow_html=True)
 
 with st.sidebar:
-    st.subheader("🧠 AI agents in this assistant")
-    for t in ["Conversational + Reporting","Visa Fix-It","Urgency / Risk Watch"]:
-        st.markdown(f'<div class="tool">{t}</div>',unsafe_allow_html=True)
-    st.markdown("---"); st.markdown("**💡 Try these**")
+    st.markdown("### ◈ Recruit360")
+    st.caption("AI Assistant · GCP Edition")
+    st.markdown("**AI AGENTS**")
+    for t in ["✓ Conversational + Reporting","✓ Visa Fix-It","✓ Urgency / Risk Watch"]:
+        st.markdown(f'<div class="agent">{t}</div>',unsafe_allow_html=True)
+    st.markdown("---"); st.markdown("**TRY THESE**")
     ex=["How many candidates are visa rejected?",
         "Total billing amount by billing domain",
         "Top 5 destination countries by candidate count",
@@ -203,5 +224,5 @@ if prompt:
 
 art=st.session_state.get("art",{})
 if isinstance(art.get("table"),pd.DataFrame) and not art["table"].empty:
-    st.markdown("#### 📋 Result data"); st.dataframe(art["table"],use_container_width=True,height=320)
-st.caption("Recruit360 AI Assistant · GCP (Vertex AI + BigQuery + LangChain) · rebuild of the reference, AI-first.")
+    st.markdown("#### Result data"); st.dataframe(art["table"],use_container_width=True,height=320)
+st.caption("Recruit360 AI Assistant · GCP (Vertex AI + BigQuery + LangChain)")
