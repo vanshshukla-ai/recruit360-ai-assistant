@@ -134,10 +134,32 @@ def urgency_watch(top_n: int = 10) -> str:
     ART["table"]=df
     return f"Top urgent / at-risk candidates:\n{df.to_string(index=False)}"
 
-TOOLS=[query_recruitment_data, visa_fix_it, urgency_watch]
+@tool
+def semantic_search_candidates(description: str, top_k: int = 5) -> str:
+    """Find candidates by MEANING (not keywords) using Vertex embeddings + BigQuery vector search.
+    Input: a natural description, e.g. 'experienced backend engineer going to Germany'."""
+    _trace("Semantic Search")
+    sql=f"""
+    SELECT h.candidate_id, c.full_name, c.role, c.destination_country, c.visa_status, h.distance
+    FROM VECTOR_SEARCH(
+      TABLE {T('candidate_embeddings')}, 'embedding',
+      (SELECT ml_generate_embedding_result AS embedding
+       FROM ML.GENERATE_EMBEDDING(MODEL {T('text_embedder')}, (SELECT @q AS content))),
+      top_k => {int(top_k)}) AS h
+    JOIN {T('candidates')} c ON c.candidate_id = h.candidate_id
+    ORDER BY h.distance"""
+    try:
+        df=bq.query(sql, job_config=bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("q","STRING",description)])).to_dataframe()
+    except Exception as e:
+        return f"Semantic search error: {e}"
+    ART["table"]=df
+    return f"Candidates matching '{description}' by meaning:\n{df.to_string(index=False)}"
+
+TOOLS=[query_recruitment_data, visa_fix_it, urgency_watch, semantic_search_candidates]
 SYSTEM=("You are the Recruit360 AI Assistant for CSRs and recruiters. "
         "Use query_recruitment_data for any data question. Use visa_fix_it to fix a rejected visa. "
-        "Use urgency_watch for urgent/at-risk cases. Never invent data; data is read-only.")
+        "Use urgency_watch for urgent/at-risk cases. Use semantic_search_candidates to find candidates by meaning/description. Never invent data; data is read-only.")
 @st.cache_resource(show_spinner=False)
 def get_agent(): return create_agent(model=get_llm(), tools=TOOLS, system_prompt=SYSTEM)
 agent=get_agent()
@@ -170,12 +192,12 @@ st.markdown("""<div class="hero"><h1>🤖 Recruit360 AI Assistant</h1>
 
 with st.sidebar:
     st.subheader("🧠 AI agents in this assistant")
-    for t in ["Conversational + Reporting","Visa Fix-It","Urgency / Risk Watch"]:
+    for t in ["Conversational + Reporting","Visa Fix-It","Urgency / Risk Watch","Semantic Search"]:
         st.markdown(f'<div class="tool">{t}</div>',unsafe_allow_html=True)
     st.markdown("---"); st.markdown("**💡 Try these**")
     for e in ["How many candidates are visa rejected?","Total billing amount by billing domain",
               "Top 5 destination countries by candidate count","Fix the visa for candidate C2013",
-              "Which candidates are most urgent right now?","How many placements and total fees?"]:
+              "Which candidates are most urgent right now?","How many placements and total fees?","Find candidates like an experienced engineer going to Germany"]:
         if st.button(e,use_container_width=True): st.session_state.pending=e
 
 if "hist" not in st.session_state: st.session_state.hist=[]
