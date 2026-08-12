@@ -1,5 +1,5 @@
 
-import os, json, re
+import os, json, re, time
 import pandas as pd
 import streamlit as st
 from google.cloud import bigquery
@@ -8,10 +8,8 @@ from langchain.agents import create_agent
 
 PROJECT="direct-tribute-502305-q5"; DATASET="recruit360"; LOCATION="us-central1"; MODEL="gemini-2.5-flash"
 def T(n): return f"`{PROJECT}.{DATASET}.{n}`"
-
 st.set_page_config(page_title="Recruit360 AI Assistant", page_icon="🤖", layout="wide")
 
-# ---------------- auth ----------------
 def _creds():
     try:
         if "gcp_service_account" in st.secrets:
@@ -31,7 +29,25 @@ def get_llm():
     return ChatVertexAI(model=MODEL, project=PROJECT, location=LOCATION, temperature=0)
 bq=get_bq(); llm=get_llm()
 
-ART={}                                   # tools run in threads -> plain dict, bridged to session
+def _invoke(prompt, tries=4):
+    for i in range(tries):
+        try: return llm.invoke(prompt)
+        except Exception as e:
+            if "429" in str(e) or "exhausted" in str(e).lower(): time.sleep(4*(i+1)); continue
+            raise
+    return llm.invoke(prompt)
+
+# ---- QUERY OPTIMIZATION: result cache + BigQuery cost cap (faster + cheaper) ----
+_SQL_CACHE={}
+def run_sql(sql):
+    if sql in _SQL_CACHE:                         # repeat question -> instant, no re-scan, no cost
+        return _SQL_CACHE[sql]
+    cfg=bigquery.QueryJobConfig(use_query_cache=True, maximum_bytes_billed=200_000_000)  # 200MB cost cap
+    df=bq.query(sql, job_config=cfg).to_dataframe()
+    _SQL_CACHE[sql]=df
+    return df
+
+ART={}
 if "art" not in st.session_state: st.session_state["art"]={}
 def _txt(m):
     c=getattr(m,"content",m)
@@ -45,11 +61,9 @@ def _readonly(sql):
 SCHEMA=f"""Tables in `{PROJECT}.{DATASET}` (join on ids):
 candidates(candidate_id, full_name, email, origin_city, destination_country, destination_employer,
   role, recruiter, csr_owner, training_centre, visa_agency, visa_status, deposit_amount, currency,
-  urgency_score, created_at)  -- visa_status: INTAKE_PENDING, TRAINING_IN_PROGRESS, VISA_SUBMITTED,
-  -- VISA_APPROVED, VISA_REJECTED, REMEDIATION_IN_PROGRESS, TRAVEL_CONFIRMED, ARRIVED, REPORTED,
-  -- NOT_REPORTED, PLACEMENT_ACTIVE
+  urgency_score, created_at)
 visa_workflows(visa_id, candidate_id, visa_agency, jurisdiction, submitted_date, decision,
-  rejection_codes, retry_count, decision_date)  -- decision: PENDING/APPROVED/REJECTED
+  rejection_codes, retry_count, decision_date)
 billing_schedules(billing_id, candidate_id, billing_domain, amount, currency, status, due_date)
 training_centres(centre_id, name, city, country)
 jobs(job_id, title, client, department, location, status, openings, recruiter, created_date)
@@ -67,26 +81,25 @@ REJECTION_FIXES={
  "R-09":"Inconsistent personal details — correct mismatched details across all documents.",
  "R-10":"Interview/extra docs required — schedule the embassy interview or provide the requested documents."}
 
-# ============ AGENT 1 — Conversational + Reporting (text-to-SQL) ============
 @tool
 def query_recruitment_data(question: str) -> str:
     """Answer ANY analytical or lookup question about Recruit360 — candidates, visas, billing,
-    training, jobs, placements. Handles counts, totals, filters, joins and lookups. Input: a
-    plain-English question. This is the main data tool."""
+    training, jobs, placements. Handles counts, totals, filters, joins and lookups. Main data tool."""
     _trace("Conversational/Reporting")
-    prompt=f"Write ONE BigQuery SELECT (only SQL, no fences) answering the question.\n{SCHEMA}\nQuestion: {question}\nSQL:"
-    sql=re.sub(r"^```(?:sql)?|```$","",_txt(llm.invoke(prompt)),flags=re.I).strip()
+    prompt=(f"Write ONE efficient BigQuery SELECT (only SQL, no fences).\n"
+            f"Select ONLY the columns needed (never SELECT *). For list/detail questions add LIMIT 100. "
+            f"Use COUNT/SUM/AVG for totals.\n{SCHEMA}\nQuestion: {question}\nSQL:")
+    sql=re.sub(r"^```(?:sql)?|```$","",_txt(_invoke(prompt)),flags=re.I).strip()
     if not _readonly(sql): return f"Blocked (read-only).\n{sql}"
-    try: df=bq.query(sql).to_dataframe()
+    try: df=run_sql(sql)
     except Exception as e: return f"Query failed: {e}\nSQL:\n{sql}"
     ART["table"]=df
     return f"SQL:\n{sql}\n\nResult:\n{df.head(30).to_string(index=False)}"
 
-# ============ AGENT 2 — Visa Fix-It ============
 @tool
 def visa_fix_it(candidate_id: str) -> str:
-    """For a candidate whose visa was REJECTED, read their rejection codes and produce a clear,
-    step-by-step remediation checklist to fix and re-apply. Input: a candidate_id like 'C2013'."""
+    """For a candidate whose visa was REJECTED, read their rejection codes and produce a clear
+    step-by-step remediation checklist. Input: a candidate_id like 'C2013'."""
     _trace("Visa Fix-It")
     cid=candidate_id.strip().upper()
     try:
@@ -97,18 +110,15 @@ def visa_fix_it(candidate_id: str) -> str:
     if df.empty: return f"No rejected visa found for {cid} (nothing to remediate)."
     codes=[c for cell in df["rejection_codes"].dropna() for c in str(cell).split(";") if c]
     mapped="\n".join(f"- {c}: {REJECTION_FIXES.get(c,'Refer to embassy guidance.')}" for c in codes)
-    ans=_txt(llm.invoke(
+    ans=_txt(_invoke(
         f"You are a visa remediation assistant. A candidate's visa was rejected with these issues:\n{mapped}\n\n"
-        f"Write a clear, numbered remediation checklist a recruiter can act on to fix and re-apply. "
-        f"Keep it practical and specific."))
+        f"Write a clear, numbered remediation checklist a recruiter can act on to fix and re-apply."))
     ART["table"]=df
     return f"Rejection codes for {cid}: {', '.join(codes)}\n\nRemediation checklist:\n{ans}"
 
-# ============ AGENT 3 — Urgency / Risk Watch ============
 @tool
 def urgency_watch(top_n: int = 10) -> str:
-    """List the highest-urgency candidates and any AWOL risks (visa_status NOT_REPORTED), with reasons.
-    Use when asked about urgent cases, risks, or what needs attention."""
+    """List the highest-urgency candidates and AWOL risks (visa_status NOT_REPORTED), with reasons."""
     _trace("Urgency/Risk")
     try:
         df=bq.query(f"""SELECT candidate_id, full_name, role, destination_country, visa_status, urgency_score
@@ -123,20 +133,23 @@ def urgency_watch(top_n: int = 10) -> str:
 
 TOOLS=[query_recruitment_data, visa_fix_it, urgency_watch]
 SYSTEM=("You are the Recruit360 AI Assistant for CSRs and recruiters. "
-        "Use query_recruitment_data for any data question (counts, totals, filters, lookups). "
-        "Use visa_fix_it when asked how to fix a rejected visa for a candidate. "
+        "Use query_recruitment_data for any data question. Use visa_fix_it to fix a rejected visa. "
         "Use urgency_watch for urgent/at-risk cases. Never invent data; data is read-only.")
-
 @st.cache_resource(show_spinner=False)
 def get_agent(): return create_agent(model=get_llm(), tools=TOOLS, system_prompt=SYSTEM)
 agent=get_agent()
 def ask(q):
     ART.clear(); ART["trace"]=[]
-    r=agent.invoke({"messages":[{"role":"user","content":q}]})
-    st.session_state["art"]=dict(ART)
-    return _txt(r["messages"][-1])
+    for i in range(3):
+        try:
+            r=agent.invoke({"messages":[{"role":"user","content":q}]})
+            st.session_state["art"]=dict(ART)
+            return _txt(r["messages"][-1])
+        except Exception as e:
+            if ("429" in str(e) or "exhausted" in str(e).lower()) and i<2: time.sleep(5); continue
+            raise
 
-# ---------------- UI ----------------
+# ---------------- UI (original purple) ----------------
 st.markdown("""<style>
 .stApp{background:linear-gradient(180deg,#0e1117,#131a2b);}
 .hero{padding:18px 26px;border-radius:14px;margin-bottom:8px;color:#fff;
@@ -157,13 +170,9 @@ with st.sidebar:
     for t in ["Conversational + Reporting","Visa Fix-It","Urgency / Risk Watch"]:
         st.markdown(f'<div class="tool">{t}</div>',unsafe_allow_html=True)
     st.markdown("---"); st.markdown("**💡 Try these**")
-    ex=["How many candidates are visa rejected?",
-        "Total billing amount by billing domain",
-        "Top 5 destination countries by candidate count",
-        "Fix the visa for candidate C2013",
-        "Which candidates are most urgent right now?",
-        "How many placements and total fees?"]
-    for e in ex:
+    for e in ["How many candidates are visa rejected?","Total billing amount by billing domain",
+              "Top 5 destination countries by candidate count","Fix the visa for candidate C2013",
+              "Which candidates are most urgent right now?","How many placements and total fees?"]:
         if st.button(e,use_container_width=True): st.session_state.pending=e
 
 if "hist" not in st.session_state: st.session_state.hist=[]
