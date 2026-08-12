@@ -44,7 +44,8 @@ def run_sql(sql):
         return _SQL_CACHE[sql]
     cfg=bigquery.QueryJobConfig(use_query_cache=True, maximum_bytes_billed=200_000_000)  # 200MB cost cap
     df=bq.query(sql, job_config=cfg).to_dataframe()
-    _SQL_CACHE[sql]=df
+    if not df.empty:                              # never cache an empty/failed result
+        _SQL_CACHE[sql]=df
     return df
 
 ART={}
@@ -59,6 +60,8 @@ def _readonly(sql):
     return l.startswith("select") and not re.search(r"\b(insert|update|delete|drop|create|alter|merge|truncate)\b",l)
 
 SCHEMA=f"""Tables in `{PROJECT}.{DATASET}` (join on ids):
+-- IMPORTANT: "visa rejected" means candidates.visa_status = 'VISA_REJECTED'.
+-- Count rejected candidates with: SELECT COUNT(*) FROM candidates WHERE visa_status='VISA_REJECTED'.
 candidates(candidate_id, full_name, email, origin_city, destination_country, destination_employer,
   role, recruiter, csr_owner, training_centre, visa_agency, visa_status, deposit_amount, currency,
   urgency_score, created_at)
