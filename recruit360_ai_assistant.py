@@ -140,13 +140,14 @@ def semantic_search_candidates(description: str, top_k: int = 5) -> str:
     Input: a natural description, e.g. 'experienced backend engineer going to Germany'."""
     _trace("Semantic Search")
     sql=f"""
-    SELECT h.candidate_id, c.full_name, c.role, c.destination_country, c.visa_status, h.distance
+    SELECT h.base.candidate_id AS candidate_id, c.full_name, c.role,
+           c.destination_country, c.visa_status, h.distance
     FROM VECTOR_SEARCH(
       TABLE {T('candidate_embeddings')}, 'embedding',
       (SELECT ml_generate_embedding_result AS embedding
        FROM ML.GENERATE_EMBEDDING(MODEL {T('text_embedder')}, (SELECT @q AS content))),
       top_k => {int(top_k)}) AS h
-    JOIN {T('candidates')} c ON c.candidate_id = h.candidate_id
+    JOIN {T('candidates')} c ON c.candidate_id = h.base.candidate_id
     ORDER BY h.distance"""
     try:
         df=bq.query(sql, job_config=bigquery.QueryJobConfig(
