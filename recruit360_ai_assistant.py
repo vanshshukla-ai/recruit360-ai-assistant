@@ -157,7 +157,28 @@ def semantic_search_candidates(description: str, top_k: int = 5) -> str:
     ART["table"]=df
     return f"Candidates matching '{description}' by meaning:\n{df.to_string(index=False)}"
 
-TOOLS=[query_recruitment_data, visa_fix_it, urgency_watch, semantic_search_candidates]
+@tool
+def predict_placement(top_n: int = 10) -> str:
+    """Predict which candidates are MOST LIKELY to be placed, using the BigQuery ML model.
+    Use when asked about placement likelihood, best prospects, or who to prioritise."""
+    _trace("Predict-Score")
+    sql=f"""
+    SELECT candidate_id,
+           ROUND((SELECT prob FROM UNNEST(predicted_is_placed_probs) WHERE label=1),3) AS placement_probability
+    FROM ML.PREDICT(MODEL {T('placement_predictor')},
+      (SELECT * FROM {T('candidates')}))
+    ORDER BY placement_probability DESC
+    LIMIT {int(top_n)}"""
+    try:
+        df=bq.query(sql).to_dataframe()
+        df=df.merge(bq.query(f"SELECT candidate_id, full_name, role, destination_country FROM {T('candidates')}").to_dataframe(),
+                    on="candidate_id", how="left")
+    except Exception as e:
+        return f"Prediction error: {e}"
+    ART["table"]=df
+    return f"Candidates most likely to be placed:\n{df.to_string(index=False)}"
+
+TOOLS=[query_recruitment_data, visa_fix_it, urgency_watch, semantic_search_candidates, predict_placement]
 SYSTEM=("You are the Recruit360 AI Assistant for CSRs and recruiters. "
         "Use query_recruitment_data for any data question. Use visa_fix_it to fix a rejected visa. "
         "Use urgency_watch for urgent/at-risk cases. Use semantic_search_candidates to find candidates by meaning/description. Never invent data; data is read-only.")
@@ -193,12 +214,12 @@ st.markdown("""<div class="hero"><h1>🤖 Recruit360 AI Assistant</h1>
 
 with st.sidebar:
     st.subheader("🧠 AI agents in this assistant")
-    for t in ["Conversational + Reporting","Visa Fix-It","Urgency / Risk Watch","Semantic Search"]:
+    for t in ["Conversational + Reporting","Visa Fix-It","Urgency / Risk Watch","Semantic Search","Predict-Score"]:
         st.markdown(f'<div class="tool">{t}</div>',unsafe_allow_html=True)
     st.markdown("---"); st.markdown("**💡 Try these**")
     for e in ["How many candidates are visa rejected?","Total billing amount by billing domain",
               "Top 5 destination countries by candidate count","Fix the visa for candidate C2013",
-              "Which candidates are most urgent right now?","How many placements and total fees?","Find candidates like an experienced engineer going to Germany"]:
+              "Which candidates are most urgent right now?","How many placements and total fees?","Find candidates like an experienced engineer going to Germany","Which candidates are most likely to be placed?"]:
         if st.button(e,use_container_width=True): st.session_state.pending=e
 
 if "hist" not in st.session_state: st.session_state.hist=[]
