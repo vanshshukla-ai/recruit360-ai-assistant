@@ -17,6 +17,9 @@ def _creds():
             os.environ["GOOGLE_APPLICATION_CREDENTIALS"]="/tmp/sa.json"
     except Exception: pass
 _creds()
+try: MAPS_KEY = st.secrets.get("MAPS_API_KEY", "")
+except Exception: MAPS_KEY = ""
+import requests, math
 import vertexai
 try: vertexai.init(project=PROJECT, location=LOCATION)
 except Exception as e: st.warning(f"Vertex init: {e}")
@@ -178,7 +181,49 @@ def predict_placement(top_n: int = 10) -> str:
     ART["table"]=df
     return f"Candidates most likely to be placed:\n{df.to_string(index=False)}"
 
-TOOLS=[query_recruitment_data, visa_fix_it, urgency_watch, semantic_search_candidates, predict_placement]
+_GEO_CACHE={}
+def _geocode(place):
+    if place in _GEO_CACHE: return _GEO_CACHE[place]
+    r=requests.get("https://maps.googleapis.com/maps/api/geocode/json",
+                   params={"address":place+", India","key":MAPS_KEY}, timeout=10).json()
+    if r.get("status")=="OK":
+        loc=r["results"][0]["geometry"]["location"]; _GEO_CACHE[place]=(loc["lat"],loc["lng"]); return _GEO_CACHE[place]
+    _GEO_CACHE[place]=None; return None
+def _haversine(a,b):
+    R=6371; la1,lo1=map(math.radians,a); la2,lo2=map(math.radians,b)
+    d=math.sin((la2-la1)/2)**2+math.cos(la1)*math.cos(la2)*math.sin((lo2-lo1)/2)**2
+    return 2*R*math.asin(math.sqrt(d))
+
+@tool
+def candidates_near_city(city: str, radius_km: float = 300) -> str:
+    """Find candidates whose origin city is near a given city, using Google Maps geocoding.
+    Input: a city name (e.g. 'Bengaluru'). Returns candidates within radius_km, nearest first."""
+    _trace("Location/Maps")
+    if not MAPS_KEY: return "Maps API key not configured (add MAPS_API_KEY to secrets)."
+    target=_geocode(city)
+    if not target: return f"Could not locate '{city}'."
+    try:
+        cities=bq.query(f"SELECT DISTINCT origin_city FROM {T('candidates')} WHERE origin_city IS NOT NULL").to_dataframe()
+    except Exception as e: return f"Query failed: {e}"
+    near=[]
+    for oc in cities["origin_city"]:
+        p=_geocode(oc)
+        if p:
+            dist=_haversine(target,p)
+            if dist<=radius_km: near.append((oc, round(dist,1)))
+    if not near: return f"No candidate origin cities within {radius_km} km of {city}."
+    near.sort(key=lambda x:x[1])
+    cities_in=[c for c,_ in near]
+    df=bq.query(f"""SELECT candidate_id, full_name, role, origin_city, destination_country, visa_status
+                    FROM {T('candidates')} WHERE origin_city IN UNNEST(@c) LIMIT 50""",
+                job_config=bigquery.QueryJobConfig(
+                  query_parameters=[bigquery.ArrayQueryParameter("c","STRING",cities_in)])).to_dataframe()
+    dmap=dict(near); df["distance_km"]=df["origin_city"].map(dmap)
+    df=df.sort_values("distance_km")
+    ART["table"]=df
+    return f"Candidates near {city} (within {radius_km} km):\n{df.to_string(index=False)}"
+
+TOOLS=[query_recruitment_data, visa_fix_it, urgency_watch, semantic_search_candidates, predict_placement, candidates_near_city]
 SYSTEM=("You are the Recruit360 AI Assistant for CSRs and recruiters. "
         "Use query_recruitment_data for any data question. Use visa_fix_it to fix a rejected visa. "
         "Use urgency_watch for urgent/at-risk cases. Use semantic_search_candidates to find candidates by meaning/description. Never invent data; data is read-only.")
@@ -214,12 +259,12 @@ st.markdown("""<div class="hero"><h1>🤖 Recruit360 AI Assistant</h1>
 
 with st.sidebar:
     st.subheader("🧠 AI agents in this assistant")
-    for t in ["Conversational + Reporting","Visa Fix-It","Urgency / Risk Watch","Semantic Search","Predict-Score"]:
+    for t in ["Conversational + Reporting","Visa Fix-It","Urgency / Risk Watch","Semantic Search","Predict-Score","Location / Maps"]:
         st.markdown(f'<div class="tool">{t}</div>',unsafe_allow_html=True)
     st.markdown("---"); st.markdown("**💡 Try these**")
     for e in ["How many candidates are visa rejected?","Total billing amount by billing domain",
               "Top 5 destination countries by candidate count","Fix the visa for candidate C2013",
-              "Which candidates are most urgent right now?","How many placements and total fees?","Find candidates like an experienced engineer going to Germany","Which candidates are most likely to be placed?"]:
+              "Which candidates are most urgent right now?","How many placements and total fees?","Find candidates like an experienced engineer going to Germany","Which candidates are most likely to be placed?","Candidates near Bengaluru"]:
         if st.button(e,use_container_width=True): st.session_state.pending=e
 
 if "hist" not in st.session_state: st.session_state.hist=[]
