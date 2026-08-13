@@ -6,3 +6,5 @@ langchain
 langchain-google-vertexai
 langgraph
 google-cloud-aiplatform
+google-cloud-documentai
+requests
