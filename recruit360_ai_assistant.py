@@ -19,6 +19,9 @@ def _creds():
 _creds()
 try: MAPS_KEY = st.secrets.get("MAPS_API_KEY", "")
 except Exception: MAPS_KEY = ""
+# --- Document AI config (fill these from your processor page) ---
+DOCAI_LOCATION  = "us"                    # region of your processor, e.g. "us" or "eu"
+DOCAI_PROCESSOR = "22d406f8def70c29"       # the Processor ID from the console
 import requests, math
 import vertexai
 try: vertexai.init(project=PROJECT, location=LOCATION)
@@ -288,3 +291,59 @@ art=st.session_state.get("art",{})
 if isinstance(art.get("table"),pd.DataFrame) and not art["table"].empty:
     st.markdown("#### 📋 Result data"); st.dataframe(art["table"],use_container_width=True,height=320)
 st.caption("Recruit360 AI Assistant · GCP (Vertex AI + BigQuery + LangChain) · rebuild of the reference, AI-first.")
+
+
+# ================= DOCUMENT AI — extract candidate from a document =================
+st.markdown("---")
+with st.expander("📄 Document AI — extract candidate details from a document image"):
+    up = st.file_uploader("Upload a résumé / ID / visa document (PNG, JPG, PDF)",
+                          type=["png","jpg","jpeg","pdf"], key="docai_up")
+    if up and st.button("Extract details", key="docai_extract"):
+        try:
+            from google.cloud import documentai
+            client = documentai.DocumentProcessorServiceClient(
+                client_options={"api_endpoint": f"{DOCAI_LOCATION}-documentai.googleapis.com"})
+            name = f"projects/{PROJECT}/locations/{DOCAI_LOCATION}/processors/{DOCAI_PROCESSOR}"
+            mime = up.type or "application/pdf"
+            raw = documentai.RawDocument(content=up.getvalue(), mime_type=mime)
+            result = client.process_document(request=documentai.ProcessRequest(name=name, raw_document=raw))
+            text = result.document.text
+            # ask Gemini to structure it
+            prompt = ("Extract candidate details from this document text as JSON with keys: "
+                      "full_name, email, phone, role, origin_city, destination_country, passport_number. "
+                      "Use empty string if a field is missing. Return ONLY JSON.\n\n" + text[:6000])
+            raw_json = _txt(_invoke(prompt))
+            raw_json = re.sub(r"^```(?:json)?|```$", "", raw_json.strip(), flags=re.I).strip()
+            st.session_state["docai_fields"] = json.loads(raw_json)
+            st.success("Extracted — review the fields below, then Save.")
+        except Exception as e:
+            st.error(f"Document AI error: {e}")
+
+    f = st.session_state.get("docai_fields")
+    if f:
+        st.markdown("**Review & edit the extracted fields:**")
+        c1, c2 = st.columns(2)
+        with c1:
+            f["full_name"] = st.text_input("Full name", f.get("full_name",""))
+            f["email"]     = st.text_input("Email", f.get("email",""))
+            f["phone"]     = st.text_input("Phone", f.get("phone",""))
+            f["role"]      = st.text_input("Role", f.get("role",""))
+        with c2:
+            f["origin_city"]         = st.text_input("Origin city", f.get("origin_city",""))
+            f["destination_country"] = st.text_input("Destination country", f.get("destination_country",""))
+            f["passport_number"]     = st.text_input("Passport number", f.get("passport_number",""))
+        if st.button("💾 Save candidate to BigQuery", key="docai_save"):
+            try:
+                import uuid
+                cid = "C" + str(uuid.uuid4().int)[:5]
+                row = {"candidate_id": cid, "full_name": f["full_name"], "email": f["email"],
+                       "origin_city": f["origin_city"], "destination_country": f["destination_country"],
+                       "role": f["role"], "visa_status": "INTAKE_PENDING",
+                       "passport_number": f["passport_number"]}
+                errors = bq.insert_rows_json(f"{PROJECT}.{DATASET}.candidates", [row])
+                if errors: st.error(f"Save failed: {errors}")
+                else:
+                    st.success(f"Saved candidate {cid} ({f['full_name']}) to BigQuery.")
+                    st.session_state["docai_fields"] = None
+            except Exception as e:
+                st.error(f"Save error: {e}")
