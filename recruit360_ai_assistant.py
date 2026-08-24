@@ -167,7 +167,7 @@ def semantic_search_candidates(description: str, top_k: int = 5) -> str:
     except Exception as e:
         return f"Semantic search error: {e}"
     # Reject weak matches: vector distance above threshold means "not really relevant".
-    THRESHOLD = 0.62
+    THRESHOLD = 0.74
     if not df.empty:
         df = df[df["distance"] <= THRESHOLD]
     if df.empty:
@@ -269,7 +269,7 @@ def match_candidates_to_job(job_title: str, destination_country: str = "", skill
     except Exception as e:
         return f"Matching error: {e}"
     # Reject weak matches so we never present unrelated people as a match.
-    THRESHOLD = 0.62
+    THRESHOLD = 0.74
     if not df.empty:
         df = df[df["distance"] <= THRESHOLD]
     if df.empty:
