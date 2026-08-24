@@ -97,12 +97,18 @@ def query_recruitment_data(question: str) -> str:
     _trace("Conversational/Reporting")
     prompt=(f"Write ONE efficient BigQuery SELECT (only SQL, no fences).\n"
             f"Select ONLY the columns needed (never SELECT *). For list/detail questions add LIMIT 100. "
-            f"Use COUNT/SUM/AVG for totals.\n{SCHEMA}\nQuestion: {question}\nSQL:")
+            f"Use COUNT/SUM/AVG for totals. When the user filters by a role, city, skill or status, "
+            f"use a WHERE clause with LOWER(column) LIKE LOWER('%value%') so matching is case-insensitive.\n"
+            f"{SCHEMA}\nQuestion: {question}\nSQL:")
     sql=re.sub(r"^```(?:sql)?|```$","",_txt(_invoke(prompt)),flags=re.I).strip()
     if not _readonly(sql): return f"Blocked (read-only).\n{sql}"
     try: df=run_sql(sql)
     except Exception as e: return f"Query failed: {e}\nSQL:\n{sql}"
     ART["table"]=df
+    if df.empty:
+        return (f"No records match this request in the database. "
+                f"There are zero results for: {question}. "
+                f"Do not invent any — the correct answer is that none were found.\n\nSQL:\n{sql}")
     return f"SQL:\n{sql}\n\nResult:\n{df.head(30).to_string(index=False)}"
 
 @tool
@@ -160,6 +166,13 @@ def semantic_search_candidates(description: str, top_k: int = 5) -> str:
             query_parameters=[bigquery.ScalarQueryParameter("q","STRING",description)])).to_dataframe()
     except Exception as e:
         return f"Semantic search error: {e}"
+    # Reject weak matches: vector distance above threshold means "not really relevant".
+    THRESHOLD = 0.62
+    if not df.empty:
+        df = df[df["distance"] <= THRESHOLD]
+    if df.empty:
+        return (f"No candidates in the database closely match '{description}'. "
+                f"I won't guess — there is no strong match for this request.")
     ART["table"]=df
     return f"Candidates matching '{description}' by meaning:\n{df.to_string(index=False)}"
 
@@ -226,10 +239,60 @@ def candidates_near_city(city: str, radius_km: float = 300) -> str:
     ART["table"]=df
     return f"Candidates near {city} (within {radius_km} km):\n{df.to_string(index=False)}"
 
-TOOLS=[query_recruitment_data, visa_fix_it, urgency_watch, semantic_search_candidates, predict_placement, candidates_near_city]
+@tool
+def match_candidates_to_job(job_title: str, destination_country: str = "", skills: str = "", top_k: int = 5) -> str:
+    """STEP 1 of recruitment - SOURCING. Given a JOB REQUIREMENT (job title, optional destination
+    and skills), find the best-matching candidates for that job using semantic search.
+    Use this when a recruiter asks 'find candidates for this job' or 'who matches this role'."""
+    _trace("Job-Candidate Match")
+    # build a job-requirement description, then reuse the embedding + vector search
+    jobdesc = f"{job_title}"
+    if skills: jobdesc += f" with skills {skills}"
+    if destination_country: jobdesc += f" going to {destination_country}"
+    sql=f"""
+    SELECT h.base.candidate_id AS candidate_id, c.full_name, c.role,
+           c.destination_country, c.visa_status, h.distance
+    FROM VECTOR_SEARCH(
+      TABLE {T('candidate_embeddings')}, 'embedding',
+      (SELECT ml_generate_embedding_result AS embedding
+       FROM ML.GENERATE_EMBEDDING(MODEL {T('text_embedder')}, (SELECT @q AS content))),
+      top_k => {int(top_k)}) AS h
+    JOIN {T('candidates')} c ON c.candidate_id = h.base.candidate_id"""
+    if destination_country:
+        sql += " WHERE LOWER(c.destination_country) = LOWER(@dest)"
+    sql += " ORDER BY h.distance"
+    try:
+        params=[bigquery.ScalarQueryParameter("q","STRING",jobdesc)]
+        if destination_country:
+            params.append(bigquery.ScalarQueryParameter("dest","STRING",destination_country))
+        df=bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe()
+    except Exception as e:
+        return f"Matching error: {e}"
+    # Reject weak matches so we never present unrelated people as a match.
+    THRESHOLD = 0.62
+    if not df.empty:
+        df = df[df["distance"] <= THRESHOLD]
+    if df.empty:
+        return (f"No matching candidates found for '{job_title}'"
+                + (f" going to {destination_country}" if destination_country else "")
+                + ". There is no candidate in the database that fits this requirement.")
+    ART["table"]=df
+    lines=[f"Best-matching candidates for the job '{job_title}'" + (f" ({destination_country})" if destination_country else "") + ":"]
+    for _,r in df.iterrows():
+        lines.append(f"- {r['full_name']} ({r['candidate_id']}) - {r['role']}, going to {r['destination_country']}, visa {r['visa_status']}")
+    return "\n".join(lines)
+
+TOOLS=[query_recruitment_data, visa_fix_it, urgency_watch, semantic_search_candidates, predict_placement, candidates_near_city, match_candidates_to_job]
 SYSTEM=("You are the Recruit360 AI Assistant for CSRs and recruiters. "
-        "Use query_recruitment_data for any data question. Use visa_fix_it to fix a rejected visa. "
-        "Use urgency_watch for urgent/at-risk cases. Use semantic_search_candidates to find candidates by meaning/description. Never invent data; data is read-only.")
+        "Use query_recruitment_data for any factual data question (counts, lists, filters by role/city/status). "
+        "Use visa_fix_it to fix a rejected visa. Use urgency_watch for urgent/at-risk cases. "
+        "Use semantic_search_candidates or match_candidates_to_job to find candidates by description. "
+        "CRITICAL RULES: "
+        "1. NEVER invent, guess, or fabricate candidates. Only report what the tools return. "
+        "2. If a tool returns 'No candidates' or 'no strong match', you MUST tell the user clearly that there are NO matching candidates. Do NOT substitute other people. "
+        "3. If the user asks for a specific role (e.g. 'Java developer') and none exist, say plainly: there are no candidates with that role in the database. "
+        "4. When a specific attribute is requested (a role, a city, a skill), prefer query_recruitment_data with a precise WHERE filter over semantic search, so results are exact. "
+        "5. Data is read-only. Report tool output faithfully and never add candidates that were not returned.")
 @st.cache_resource(show_spinner=False)
 def get_agent(): return create_agent(model=get_llm(), tools=TOOLS, system_prompt=SYSTEM)
 agent=get_agent()
@@ -262,12 +325,12 @@ st.markdown("""<div class="hero"><h1>🤖 Recruit360 AI Assistant</h1>
 
 with st.sidebar:
     st.subheader("🧠 AI agents in this assistant")
-    for t in ["Conversational + Reporting","Visa Fix-It","Urgency / Risk Watch","Semantic Search","Predict-Score","Location / Maps"]:
+    for t in ["Conversational + Reporting","Visa Fix-It","Urgency / Risk Watch","Semantic Search","Predict-Score","Location / Maps","Job-Candidate Match"]:
         st.markdown(f'<div class="tool">{t}</div>',unsafe_allow_html=True)
     st.markdown("---"); st.markdown("**💡 Try these**")
     for e in ["How many candidates are visa rejected?","Total billing amount by billing domain",
               "Top 5 destination countries by candidate count","Fix the visa for candidate C2013",
-              "Which candidates are most urgent right now?","How many placements and total fees?","Find candidates like an experienced engineer going to Germany","Which candidates are most likely to be placed?","Candidates near Bengaluru"]:
+              "Which candidates are most urgent right now?","How many placements and total fees?","Find candidates like an experienced engineer going to Germany","Which candidates are most likely to be placed?","Candidates near Bengaluru","Find candidates for a QA Engineer job going to Sweden"]:
         if st.button(e,use_container_width=True): st.session_state.pending=e
 
 if "hist" not in st.session_state: st.session_state.hist=[]
