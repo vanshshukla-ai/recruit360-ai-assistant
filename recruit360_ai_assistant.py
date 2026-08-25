@@ -284,15 +284,20 @@ def match_candidates_to_job(job_title: str, destination_country: str = "", skill
 
 TOOLS=[query_recruitment_data, visa_fix_it, urgency_watch, semantic_search_candidates, predict_placement, candidates_near_city, match_candidates_to_job]
 SYSTEM=("You are the Recruit360 AI Assistant for CSRs and recruiters. "
-        "Use query_recruitment_data for any factual data question (counts, lists, filters by role/city/status). "
-        "Use visa_fix_it to fix a rejected visa. Use urgency_watch for urgent/at-risk cases. "
-        "Use semantic_search_candidates or match_candidates_to_job to find candidates by description. "
-        "CRITICAL RULES: "
-        "1. NEVER invent, guess, or fabricate candidates. Only report what the tools return. "
-        "2. If a tool returns 'No candidates' or 'no strong match', you MUST tell the user clearly that there are NO matching candidates. Do NOT substitute other people. "
-        "3. If the user asks for a specific role (e.g. 'Java developer') and none exist, say plainly: there are no candidates with that role in the database. "
-        "4. When a specific attribute is requested (a role, a city, a skill), prefer query_recruitment_data with a precise WHERE filter over semantic search, so results are exact. "
-        "5. Data is read-only. Report tool output faithfully and never add candidates that were not returned.")
+        "You have NO knowledge of any candidate from your own memory. The ONLY source of candidate information is the tools. "
+        "You MUST call a tool for EVERY question about candidates, counts, jobs, visas, or data. "
+        "NEVER answer a candidate question from your own knowledge or by generating a name. "
+        "\n\nTOOL CHOICE: "
+        "Use query_recruitment_data for factual questions (counts, lists, filters by role/city/visa status). "
+        "Use visa_fix_it to fix a rejected visa. Use urgency_watch for urgent cases. "
+        "Use semantic_search_candidates or match_candidates_to_job to find candidates by role/description. "
+        "\n\nABSOLUTE RULES (violating these is a critical failure): "
+        "1. NEVER invent, guess, generate, or fabricate a candidate name or ID. Real candidate IDs look like C2001-C3000. If you ever produce a name or ID that did not come directly from a tool result, that is a serious error. "
+        "2. Candidate profiles are stored by ROLE (e.g. Software Engineer, QA Engineer, Data Engineer), not by individual skill. "
+        "3. If asked about a specific skill (e.g. 'who knows Java'), first note that profiles are organised by role rather than skill, then use query_recruitment_data to search the closest matching ROLE. Only report candidates the tool actually returns. "
+        "4. If a tool returns no rows or 'No candidates', you MUST say there are NO matching candidates. NEVER substitute other people. "
+        "5. If a tool was not called, do NOT answer — call the appropriate tool first. "
+        "6. Data is read-only. Report tool output faithfully and add nothing.")
 @st.cache_resource(show_spinner=False)
 def get_agent(): return create_agent(model=get_llm(), tools=TOOLS, system_prompt=SYSTEM)
 agent=get_agent()
@@ -395,18 +400,6 @@ with st.expander("📄 Document AI — extract candidate details from a document
             f["origin_city"]         = st.text_input("Origin city", f.get("origin_city",""))
             f["destination_country"] = st.text_input("Destination country", f.get("destination_country",""))
             f["passport_number"]     = st.text_input("Passport number", f.get("passport_number",""))
-        if st.button("💾 Save candidate to BigQuery", key="docai_save"):
-            try:
-                import uuid
-                cid = "C" + str(uuid.uuid4().int)[:5]
-                row = {"candidate_id": cid, "full_name": f["full_name"], "email": f["email"],
-                       "origin_city": f["origin_city"], "destination_country": f["destination_country"],
-                       "role": f["role"], "visa_status": "INTAKE_PENDING",
-                       "passport_number": f["passport_number"]}
-                errors = bq.insert_rows_json(f"{PROJECT}.{DATASET}.candidates", [row])
-                if errors: st.error(f"Save failed: {errors}")
-                else:
-                    st.success(f"Saved candidate {cid} ({f['full_name']}) to BigQuery.")
-                    st.session_state["docai_fields"] = None
-            except Exception as e:
-                st.error(f"Save error: {e}")
+        st.info("This panel reads the document and shows the extracted details for review. "
+                "To register a candidate into the system, please use the Candidate Registration page in the main app, "
+                "which saves to the primary database (Cloud SQL) and keeps everything in sync.")
