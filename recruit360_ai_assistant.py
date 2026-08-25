@@ -1,7 +1,4 @@
-"""
-Recruit360 AI Assistant — GCP Edition (purple UI + query optimization)
-Vertex AI (Gemini) + BigQuery + LangChain. Agents: Conversational+Reporting, Visa Fix-It, Urgency/Risk.
-"""
+
 import os, json, re, time
 import pandas as pd
 import streamlit as st
@@ -99,7 +96,7 @@ def query_recruitment_data(question: str) -> str:
     training, jobs, placements. Handles counts, totals, filters, joins and lookups. Main data tool."""
     _trace("Conversational/Reporting")
     prompt=(f"Write ONE efficient BigQuery SELECT (only SQL, no fences).\n"
-            f"Select ONLY the columns needed (never SELECT *). For list/detail questions add LIMIT 100. "
+            f"Select ONLY the columns needed (never SELECT *). For list/detail questions add LIMIT 10 (keep lists short and readable). "
             f"Use COUNT/SUM/AVG for totals. When the user filters by a role, city, skill or status, "
             f"use a WHERE clause with LOWER(column) LIKE LOWER('%value%') so matching is case-insensitive.\n"
             f"{SCHEMA}\nQuestion: {question}\nSQL:")
@@ -112,7 +109,9 @@ def query_recruitment_data(question: str) -> str:
         return (f"No records match this request in the database. "
                 f"There are zero results for: {question}. "
                 f"Do not invent any — the correct answer is that none were found.\n\nSQL:\n{sql}")
-    return f"SQL:\n{sql}\n\nResult:\n{df.head(30).to_string(index=False)}"
+    shown = df.head(8)
+    note = "" if len(df) <= 8 else f"\n\n(Showing 8 of {len(df)} — full list is in the result table below.)"
+    return f"Result ({len(df)} found):\n{shown.to_string(index=False)}{note}"
 
 @tool
 def visa_fix_it(candidate_id: str) -> str:
@@ -348,7 +347,7 @@ with st.sidebar:
         if st.button(e,use_container_width=True): st.session_state.pending=e
 
     st.markdown("---")
-    st.markdown("**💬 Conversation**")
+    st.markdown("**💬 Conversation** `v2.1 — chat memory`")
     if st.button("New chat", use_container_width=True):
         st.session_state.hist=[]; st.rerun()
     if "saved_chats" not in st.session_state: st.session_state.saved_chats={}
