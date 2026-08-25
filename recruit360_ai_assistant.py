@@ -1,4 +1,7 @@
-
+"""
+Recruit360 AI Assistant — GCP Edition (purple UI + query optimization)
+Vertex AI (Gemini) + BigQuery + LangChain. Agents: Conversational+Reporting, Visa Fix-It, Urgency/Risk.
+"""
 import os, json, re, time
 import pandas as pd
 import streamlit as st
@@ -301,11 +304,17 @@ SYSTEM=("You are the Recruit360 AI Assistant for CSRs and recruiters. "
 @st.cache_resource(show_spinner=False)
 def get_agent(): return create_agent(model=get_llm(), tools=TOOLS, system_prompt=SYSTEM)
 agent=get_agent()
-def ask(q):
+def ask(q, history=None):
     ART.clear(); ART["trace"]=[]
+    # Build the message list WITH prior conversation so follow-ups like "yes" have context
+    msgs=[]
+    if history:
+        for role, txt in history[-10:]:  # last 10 turns for context
+            msgs.append({"role": "user" if role=="user" else "assistant", "content": txt})
+    msgs.append({"role":"user","content":q})
     for i in range(3):
         try:
-            r=agent.invoke({"messages":[{"role":"user","content":q}]})
+            r=agent.invoke({"messages":msgs})
             st.session_state["art"]=dict(ART)
             return _txt(r["messages"][-1])
         except Exception as e:
@@ -338,6 +347,28 @@ with st.sidebar:
               "Which candidates are most urgent right now?","How many placements and total fees?","Find candidates like an experienced engineer going to Germany","Which candidates are most likely to be placed?","Candidates near Bengaluru","Find candidates for a QA Engineer job going to Sweden"]:
         if st.button(e,use_container_width=True): st.session_state.pending=e
 
+    st.markdown("---")
+    st.markdown("**💬 Conversation**")
+    if st.button("New chat", use_container_width=True):
+        st.session_state.hist=[]; st.rerun()
+    if "saved_chats" not in st.session_state: st.session_state.saved_chats={}
+    if st.button("Save this chat", use_container_width=True):
+        if st.session_state.get("hist"):
+            import datetime as _dt
+            first_q=next((t for r,t in st.session_state.hist if r=="user"),"chat")
+            name=(first_q[:30]+"…") if len(first_q)>30 else first_q
+            name=_dt.datetime.now().strftime("%H:%M ")+name
+            st.session_state.saved_chats[name]=list(st.session_state.hist)
+            st.success("Chat saved.")
+    if st.session_state.get("saved_chats"):
+        st.caption("Saved chats")
+        for nm in list(st.session_state.saved_chats.keys()):
+            c1,c2=st.columns([4,1])
+            if c1.button(nm, key="open_"+nm, use_container_width=True):
+                st.session_state.hist=list(st.session_state.saved_chats[nm]); st.rerun()
+            if c2.button("✕", key="del_"+nm):
+                del st.session_state.saved_chats[nm]; st.rerun()
+
 if "hist" not in st.session_state: st.session_state.hist=[]
 for role,txt in st.session_state.hist:
     with st.chat_message(role): st.markdown(txt)
@@ -348,7 +379,7 @@ if prompt:
     with st.chat_message("user"): st.markdown(prompt)
     with st.chat_message("assistant"):
         with st.spinner("Thinking across the AI agents…"):
-            try: ans=ask(prompt)
+            try: ans=ask(prompt, st.session_state.hist[:-1])
             except Exception as e: ans=f"Something went wrong: {e}"
         st.markdown(ans)
         tr=st.session_state.get("art",{}).get("trace",[])
