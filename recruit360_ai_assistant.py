@@ -296,7 +296,10 @@ SYSTEM=("You are the Recruit360 AI Assistant for CSRs and recruiters. "
         "\n\nABSOLUTE RULES (violating these is a critical failure): "
         "1. NEVER invent, guess, generate, or fabricate a candidate name or ID. Real candidate IDs look like C2001-C3000. If you ever produce a name or ID that did not come directly from a tool result, that is a serious error. "
         "2. Candidate profiles are stored by ROLE (e.g. Software Engineer, QA Engineer, Data Engineer), not by individual skill. "
-        "3. If asked about a specific skill (e.g. 'who knows Java'), first note that profiles are organised by role rather than skill, then use query_recruitment_data to search the closest matching ROLE. Only report candidates the tool actually returns. "
+        "3. Candidate profiles are stored by ROLE and do NOT include a 'years of experience' field. "
+        "Always search using query_recruitment_data with a case-insensitive filter on the actual data. "
+        "If asked to filter by something not stored (e.g. years of experience), simply say NO clearly: that data is not in the database. Do NOT invent it. "
+        "If a search returns no rows, say plainly that there are no matching candidates. Never substitute unrelated people. "
         "4. If a tool returns no rows or 'No candidates', you MUST say there are NO matching candidates. NEVER substitute other people. "
         "5. If a tool was not called, do NOT answer — call the appropriate tool first. "
         "6. Data is read-only. Report tool output faithfully and add nothing.")
@@ -347,26 +350,45 @@ with st.sidebar:
         if st.button(e,use_container_width=True): st.session_state.pending=e
 
     st.markdown("---")
-    st.markdown("**💬 Conversation** `v2.1 — chat memory`")
+    st.markdown("**💬 Conversation** `v2.2 — saved chats`")
+    API_BASE = "https://recruit360-api-302453734275.us-central1.run.app"
+
     if st.button("New chat", use_container_width=True):
         st.session_state.hist=[]; st.rerun()
-    if "saved_chats" not in st.session_state: st.session_state.saved_chats={}
+
     if st.button("Save this chat", use_container_width=True):
         if st.session_state.get("hist"):
             import datetime as _dt
             first_q=next((t for r,t in st.session_state.hist if r=="user"),"chat")
             name=(first_q[:30]+"…") if len(first_q)>30 else first_q
             name=_dt.datetime.now().strftime("%H:%M ")+name
-            st.session_state.saved_chats[name]=list(st.session_state.hist)
-            st.success("Chat saved.")
-    if st.session_state.get("saved_chats"):
+            try:
+                requests.post(f"{API_BASE}/chats", json={"chat_name": name, "messages": st.session_state.hist}, timeout=10)
+                st.success("Chat saved.")
+            except Exception as e:
+                st.error("Could not save chat.")
+
+    # Load saved chats from the backend (persist across refreshes)
+    try:
+        r = requests.get(f"{API_BASE}/chats", timeout=10)
+        saved = r.json().get("chats", []) if r.ok else []
+    except Exception:
+        saved = []
+    if saved:
         st.caption("Saved chats")
-        for nm in list(st.session_state.saved_chats.keys()):
+        for ch in saved:
             c1,c2=st.columns([4,1])
-            if c1.button(nm, key="open_"+nm, use_container_width=True):
-                st.session_state.hist=list(st.session_state.saved_chats[nm]); st.rerun()
-            if c2.button("✕", key="del_"+nm):
-                del st.session_state.saved_chats[nm]; st.rerun()
+            if c1.button(ch["chat_name"], key="open_"+ch["chat_id"], use_container_width=True):
+                try:
+                    msgs = json.loads(ch["messages"]) if isinstance(ch["messages"], str) else ch["messages"]
+                    st.session_state.hist=[tuple(m) for m in msgs]; st.rerun()
+                except Exception:
+                    pass
+            if c2.button("✕", key="del_"+ch["chat_id"]):
+                try:
+                    requests.delete(f"{API_BASE}/chats/{ch['chat_id']}", timeout=10); st.rerun()
+                except Exception:
+                    pass
 
 if "hist" not in st.session_state: st.session_state.hist=[]
 for role,txt in st.session_state.hist:
