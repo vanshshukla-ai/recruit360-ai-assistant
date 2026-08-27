@@ -68,6 +68,16 @@ def _readonly(sql):
 SCHEMA=f"""Tables in `{PROJECT}.{DATASET}` (join on ids):
 -- IMPORTANT: "visa rejected" means candidates.visa_status = 'VISA_REJECTED'.
 -- Count rejected candidates with: SELECT COUNT(*) FROM candidates WHERE visa_status='VISA_REJECTED'.
+-- The 8 valid roles are exactly: Software Engineer, Registered Nurse, Data Engineer, Cloud Architect, DevOps Engineer, Data Analyst, QA Engineer, Mechanical Engineer.
+-- visa_status values group into PIPELINE STAGES:
+--   Intake = INTAKE_PENDING, STAKEHOLDERS_ASSIGNED, TERMS_LOCKED
+--   Screening = DOCUMENTS_VERIFIED, SCREENING, TRAINING_IN_PROGRESS, TRAINING_COMPLETE, REMEDIATION_IN_PROGRESS
+--   Placement = PLACEMENT_ACTIVE
+--   Visa = VISA_SUBMITTED, VISA_APPROVED, VISA_REJECTED
+--   Travel = TRAVEL_CONFIRMED, REPORTED, NOT_REPORTED, ARRIVED
+-- For "how many in <stage>", filter visa_status IN (the statuses for that stage).
+-- Use LOWER(col) LIKE LOWER('%x%') for text filters so matching is case-insensitive.
+-- There is NO skills column and NO years-of-experience column.
 candidates(candidate_id, full_name, email, origin_city, destination_country, destination_employer,
   role, recruiter, csr_owner, training_centre, visa_agency, visa_status, deposit_amount, currency,
   urgency_score, created_at)
@@ -96,9 +106,13 @@ def query_recruitment_data(question: str) -> str:
     training, jobs, placements. Handles counts, totals, filters, joins and lookups. Main data tool."""
     _trace("Conversational/Reporting")
     prompt=(f"Write ONE efficient BigQuery SELECT (only SQL, no fences).\n"
-            f"Select ONLY the columns needed (never SELECT *). For list/detail questions add LIMIT 10 (keep lists short and readable). "
-            f"Use COUNT/SUM/AVG for totals. When the user filters by a role, city, skill or status, "
-            f"use a WHERE clause with LOWER(column) LIKE LOWER('%value%') so matching is case-insensitive.\n"
+            f"Rules for accuracy:\n"
+            f"- Select ONLY the columns needed (never SELECT *). For list questions add LIMIT 10.\n"
+            f"- Use COUNT/SUM/AVG for totals; use GROUP BY for 'per', 'by', 'each', 'breakdown' questions.\n"
+            f"- Use ORDER BY ... DESC and LIMIT for 'top', 'most', 'highest', 'which ... most' questions.\n"
+            f"- For text filters (role, city, status, country) use LOWER(col) LIKE LOWER('%value%') for case-insensitivity.\n"
+            f"- For pipeline STAGE questions, map the stage to its visa_status values (see schema) and filter with visa_status IN (...).\n"
+            f"- Only use columns that exist in the schema. If the question needs a column that does not exist (e.g. skills, years of experience), do NOT invent it.\n"
             f"{SCHEMA}\nQuestion: {question}\nSQL:")
     sql=re.sub(r"^```(?:sql)?|```$","",_txt(_invoke(prompt)),flags=re.I).strip()
     if not _readonly(sql): return f"Blocked (read-only).\n{sql}"
