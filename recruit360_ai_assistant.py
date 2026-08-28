@@ -77,7 +77,9 @@ SCHEMA=f"""Tables in `{PROJECT}.{DATASET}` (join on ids):
 --   Travel = TRAVEL_CONFIRMED, REPORTED, NOT_REPORTED, ARRIVED
 -- For "how many in <stage>", filter visa_status IN (the statuses for that stage).
 -- Use LOWER(col) LIKE LOWER('%x%') for text filters so matching is case-insensitive.
--- There is NO skills column and NO years-of-experience column.
+-- candidates.experience_years (INTEGER) holds years of experience. For '5+ years' use experience_years >= 5; for 'between 3 and 6' use experience_years BETWEEN 3 AND 6.
+-- 'fresher' or 'entry-level' means experience_years <= 1 (little or no experience). 'experienced' or 'senior' means experience_years >= 5.
+-- There is NO skills column (profiles are organised by role).
 candidates(candidate_id, full_name, email, origin_city, destination_country, destination_employer,
   role, recruiter, csr_owner, training_centre, visa_agency, visa_status, deposit_amount, currency,
   urgency_score, created_at)
@@ -310,10 +312,10 @@ SYSTEM=("You are the Recruit360 AI Assistant for CSRs and recruiters. "
         "\n\nABSOLUTE RULES (violating these is a critical failure): "
         "1. NEVER invent, guess, generate, or fabricate a candidate name or ID. Real candidate IDs look like C2001-C3000. If you ever produce a name or ID that did not come directly from a tool result, that is a serious error. "
         "2. Candidate profiles are stored by ROLE (e.g. Software Engineer, QA Engineer, Data Engineer), not by individual skill. "
-        "3. Candidate profiles are stored by ROLE and do NOT include a 'years of experience' field. "
-        "Always search using query_recruitment_data with a case-insensitive filter on the actual data. "
-        "If asked to filter by something not stored (e.g. years of experience), simply say NO clearly: that data is not in the database. Do NOT invent it. "
-        "If a search returns no rows, say plainly that there are no matching candidates. Never substitute unrelated people. "
+        "3. Candidate profiles are organised by ROLE and now include experience_years (years of experience). "
+        "You CAN filter by experience, e.g. 'candidates with 5+ years' -> experience_years >= 5. "
+        "There is still NO skills column. If asked about a skill, note that profiles are organised by role, and search the closest role. "
+        "Always search using query_recruitment_data. If a search returns no rows, say plainly there are no matching candidates. Never substitute unrelated people. Never invent data. "
         "4. If a tool returns no rows or 'No candidates', you MUST say there are NO matching candidates. NEVER substitute other people. "
         "5. If a tool was not called, do NOT answer — call the appropriate tool first. "
         "6. Data is read-only. Report tool output faithfully and add nothing.")
