@@ -1,7 +1,4 @@
-"""
-Recruit360 AI Assistant — GCP Edition (purple UI + query optimization)
-Vertex AI (Gemini) + BigQuery + LangChain. Agents: Conversational+Reporting, Visa Fix-It, Urgency/Risk.
-"""
+
 import os, json, re, time
 import pandas as pd
 import streamlit as st
