@@ -1,4 +1,7 @@
-
+"""
+Recruit360 AI Assistant — GCP Edition (purple UI + query optimization)
+Vertex AI (Gemini) + BigQuery + LangChain. Agents: Conversational+Reporting, Visa Fix-It, Urgency/Risk.
+"""
 import os, json, re, time
 import pandas as pd
 import streamlit as st
@@ -80,6 +83,13 @@ SCHEMA=f"""Tables in `{PROJECT}.{DATASET}` (join on ids):
 -- candidates.experience_years (INTEGER) holds years of experience. For '5+ years' use experience_years >= 5; for 'between 3 and 6' use experience_years BETWEEN 3 AND 6.
 -- 'fresher' or 'entry-level' means experience_years <= 1 (little or no experience). 'experienced' or 'senior' means experience_years >= 5.
 -- There is NO skills column (profiles are organised by role).
+-- ***LOCATION - VERY IMPORTANT, DO NOT CONFUSE THESE TWO COLUMNS:***
+--   origin_city = where the candidate CURRENTLY lives / is FROM (an Indian city like Delhi, Mumbai, Bengaluru). This is their CURRENT LOCATION.
+--   destination_country = where the candidate WANTS TO GO / be placed (a foreign country like Germany, Sweden, Ireland). This is NOT their current location.
+--   "candidates in Delhi" / "candidates from Delhi" / "current location Delhi" -> filter origin_city = 'Delhi'.
+--   "candidates going to Germany" / "destination Germany" / "placed in Sweden" -> filter destination_country.
+--   NEVER say a candidate is "in" or "located in" their destination_country. The destination is where they are going, not where they are.
+-- "Developer profile" is not an exact role. The closest real roles are Software Engineer and Data Engineer. When someone says 'developer', search those roles.
 candidates(candidate_id, full_name, email, origin_city, destination_country, destination_employer,
   role, recruiter, csr_owner, training_centre, visa_agency, visa_status, deposit_amount, currency,
   urgency_score, created_at)
@@ -114,7 +124,7 @@ def query_recruitment_data(question: str) -> str:
             f"- Use ORDER BY ... DESC and LIMIT for 'top', 'most', 'highest', 'which ... most' questions.\n"
             f"- For text filters (role, city, status, country) use LOWER(col) LIKE LOWER('%value%') for case-insensitivity.\n"
             f"- For pipeline STAGE questions, map the stage to its visa_status values (see schema) and filter with visa_status IN (...).\n"
-            f"- Only use columns that exist in the schema. If the question needs a column that does not exist (e.g. skills, years of experience), do NOT invent it.\n"
+            f"- experience_years EXISTS: use it for experience filters (e.g. 'fresher' -> experience_years <= 1, '5+ years' -> experience_years >= 5). But there is NO skills column — do not invent one.\n"
             f"{SCHEMA}\nQuestion: {question}\nSQL:")
     sql=re.sub(r"^```(?:sql)?|```$","",_txt(_invoke(prompt)),flags=re.I).strip()
     if not _readonly(sql): return f"Blocked (read-only).\n{sql}"
@@ -213,7 +223,8 @@ def predict_placement(top_n: int = 10) -> str:
     except Exception as e:
         return f"Prediction error: {e}"
     ART["table"]=df
-    return f"Candidates most likely to be placed:\n{df.to_string(index=False)}"
+    return ("Candidates most likely to be placed, ranked by a model-estimated placement probability "
+            "(a score from 0 to 1 where higher means more likely to be placed):\n" + df.to_string(index=False))
 
 _GEO_CACHE={}
 def _geocode(place):
@@ -248,14 +259,15 @@ def candidates_near_city(city: str, radius_km: float = 300) -> str:
     if not near: return f"No candidate origin cities within {radius_km} km of {city}."
     near.sort(key=lambda x:x[1])
     cities_in=[c for c,_ in near]
-    df=bq.query(f"""SELECT candidate_id, full_name, role, origin_city, destination_country, visa_status
+    df=bq.query(f"""SELECT candidate_id, full_name, role,
+                       origin_city AS current_city, destination_country AS going_to, visa_status
                     FROM {T('candidates')} WHERE origin_city IN UNNEST(@c) LIMIT 50""",
                 job_config=bigquery.QueryJobConfig(
                   query_parameters=[bigquery.ArrayQueryParameter("c","STRING",cities_in)])).to_dataframe()
-    dmap=dict(near); df["distance_km"]=df["origin_city"].map(dmap)
+    dmap=dict(near); df["distance_km"]=df["current_city"].map(dmap)
     df=df.sort_values("distance_km")
     ART["table"]=df
-    return f"Candidates near {city} (within {radius_km} km):\n{df.to_string(index=False)}"
+    return f"Candidates whose CURRENT city is near {city} (within {radius_km} km). 'current_city' = where they live now, 'going_to' = their destination country:\n{df.to_string(index=False)}"
 
 @tool
 def match_candidates_to_job(job_title: str, destination_country: str = "", skills: str = "", top_k: int = 5) -> str:
@@ -318,7 +330,16 @@ SYSTEM=("You are the Recruit360 AI Assistant for CSRs and recruiters. "
         "Always search using query_recruitment_data. If a search returns no rows, say plainly there are no matching candidates. Never substitute unrelated people. Never invent data. "
         "4. If a tool returns no rows or 'No candidates', you MUST say there are NO matching candidates. NEVER substitute other people. "
         "5. If a tool was not called, do NOT answer — call the appropriate tool first. "
-        "6. Data is read-only. Report tool output faithfully and add nothing.")
+        "6. LOCATION (very important - this caused confusion before): the candidates table has TWO location fields. origin_city = where the candidate CURRENTLY lives, an Indian city like Delhi or Mumbai (their CURRENT LOCATION). destination_country = the foreign country where they WANT to be placed, like Germany or Sweden (NOT where they are now). "
+        "When the user says 'current location', 'located in', 'in Delhi', 'near Delhi', 'from Delhi', or any Indian city -> that is origin_city. "
+        "When the user says 'going to', 'destination', 'placed in', or a foreign country -> that is destination_country. "
+        "NEVER present destination_country as the candidate's current location. NEVER answer a 'current location' question with destination data. If you show a location column, state explicitly whether it is the current city or the destination country. "
+        "7. CONSISTENCY WITHIN A CONVERSATION: every candidate list must come fresh from a tool call for THAT question. NEVER carry names from a previous answer into a new list, and never add extra candidates (like C2001/C2002) that were not in the current tool result. If a follow-up asks about 'these candidates', re-query using their exact IDs from the previous result - do not improvise. If your count says 'N total' but you only show some, say clearly 'showing X of N'. "
+        "8. PLACEMENT PROBABILITY / 'likely to be placed': this uses a model estimate (0 to 1, higher = more likely). Always explain it is a model-estimated score, not a guarantee, and note the model does not use a specific month - if asked 'this month', clarify the score is an overall placement-likelihood estimate, not tied to a calendar month. Never present a bare probability number without this context. "
+        "9. Answer the EXACT question asked, directly. If the data is available, retrieve and answer it - do NOT deflect with a counter-question. Only ask for clarification if the question is truly ambiguous AND you cannot reasonably retrieve an answer. Avoid answering a question with a question. "
+        "10. If asked to summarise the conversation, give a brief accurate recap of what was actually asked and answered. If asked how many answers were correct or similar meta questions, answer plainly and honestly without self-congratulation or vague claims - say you cannot verify correctness yourself if that is the honest answer. "
+        "11. VISA REASON CODES: if asked why visas were rejected and the data only has codes (like R-01, R-05), present them as reason codes and say each code corresponds to a specific rejection reason in the system - do not pretend to know the full text of each code unless the data provides it. "
+        "12. Data is read-only. Report tool output faithfully and add nothing you cannot see in a tool result.")
 @st.cache_resource(show_spinner=False)
 def get_agent(): return create_agent(model=get_llm(), tools=TOOLS, system_prompt=SYSTEM)
 agent=get_agent()
@@ -366,21 +387,27 @@ with st.sidebar:
         if st.button(e,use_container_width=True): st.session_state.pending=e
 
     st.markdown("---")
-    st.markdown("**💬 Conversation** `v2.2 — saved chats`")
+    st.markdown("**💬 Conversation** `v2.3 — accuracy + rename`")
     API_BASE = "https://recruit360-api-302453734275.us-central1.run.app"
 
     if st.button("New chat", use_container_width=True):
         st.session_state.hist=[]; st.rerun()
 
+    # Custom name for saving (sir asked to name chats ourselves)
+    custom_name = st.text_input("Chat name (optional)", key="save_name", placeholder="e.g. Delhi developers demo")
     if st.button("Save this chat", use_container_width=True):
         if st.session_state.get("hist"):
             import datetime as _dt
-            first_q=next((t for r,t in st.session_state.hist if r=="user"),"chat")
-            name=(first_q[:30]+"…") if len(first_q)>30 else first_q
-            name=_dt.datetime.now().strftime("%H:%M ")+name
+            if custom_name and custom_name.strip():
+                name = custom_name.strip()
+            else:
+                first_q=next((t for r,t in st.session_state.hist if r=="user"),"chat")
+                name=(first_q[:30]+"…") if len(first_q)>30 else first_q
+                name=_dt.datetime.now().strftime("%H:%M ")+name
             try:
                 requests.post(f"{API_BASE}/chats", json={"chat_name": name, "messages": st.session_state.hist}, timeout=10)
                 st.success("Chat saved.")
+                st.rerun()
             except Exception as e:
                 st.error("Could not save chat.")
 
@@ -393,18 +420,32 @@ with st.sidebar:
     if saved:
         st.caption("Saved chats")
         for ch in saved:
-            c1,c2=st.columns([4,1])
+            c1,c2,c3=st.columns([4,1,1])
             if c1.button(ch["chat_name"], key="open_"+ch["chat_id"], use_container_width=True):
                 try:
                     msgs = json.loads(ch["messages"]) if isinstance(ch["messages"], str) else ch["messages"]
                     st.session_state.hist=[tuple(m) for m in msgs]; st.rerun()
                 except Exception:
                     pass
-            if c2.button("✕", key="del_"+ch["chat_id"]):
+            if c2.button("✏️", key="edit_"+ch["chat_id"], help="Rename"):
+                st.session_state["renaming"] = ch["chat_id"]; st.rerun()
+            if c3.button("✕", key="del_"+ch["chat_id"], help="Delete"):
                 try:
                     requests.delete(f"{API_BASE}/chats/{ch['chat_id']}", timeout=10); st.rerun()
                 except Exception:
                     pass
+            # Inline rename box
+            if st.session_state.get("renaming") == ch["chat_id"]:
+                new_nm = st.text_input("New name", value=ch["chat_name"], key="rn_"+ch["chat_id"])
+                rc1, rc2 = st.columns(2)
+                if rc1.button("Save", key="rnsave_"+ch["chat_id"]):
+                    try:
+                        requests.patch(f"{API_BASE}/chats/{ch['chat_id']}", json={"chat_name": new_nm}, timeout=10)
+                        st.session_state["renaming"] = None; st.rerun()
+                    except Exception:
+                        st.error("Could not rename.")
+                if rc2.button("Cancel", key="rncancel_"+ch["chat_id"]):
+                    st.session_state["renaming"] = None; st.rerun()
 
 if "hist" not in st.session_state: st.session_state.hist=[]
 for role,txt in st.session_state.hist:
