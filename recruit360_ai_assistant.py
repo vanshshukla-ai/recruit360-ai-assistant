@@ -125,7 +125,7 @@ def query_recruitment_data(question: str) -> str:
     list_limit = 500 if want_all else 50
     prompt=(f"Write ONE efficient BigQuery SELECT (only SQL, no fences).\n"
             f"Rules for accuracy:\n"
-            f"- Select ONLY the columns needed (never SELECT *). For list questions add LIMIT {list_limit}.\n"
+            f"- Select ONLY the columns needed (never SELECT *). For a list of records, ALWAYS add LIMIT {list_limit} at the very end (never a smaller limit like 10). For a single count/total, use COUNT(*) with no LIMIT.\n"
             f"- Use COUNT/SUM/AVG for totals; use GROUP BY for 'per', 'by', 'each', 'breakdown' questions.\n"
             f"- Use ORDER BY ... DESC and LIMIT for 'top', 'most', 'highest', 'which ... most' questions.\n"
             f"- For text filters (role, city, status, country) use LOWER(col) LIKE LOWER('%value%') for case-insensitivity.\n"
@@ -134,16 +134,24 @@ def query_recruitment_data(question: str) -> str:
             f"{SCHEMA}\nQuestion: {question}\nSQL:")
     sql=re.sub(r"^```(?:sql)?|```$","",_txt(_invoke(prompt)),flags=re.I).strip()
     if not _readonly(sql): return f"Blocked (read-only).\n{sql}"
-    # Determine the TRUE total for list queries by stripping any LIMIT and counting.
+    # Determine the TRUE total for list queries, independent of any LIMIT the model wrote.
     is_list = bool(re.match(r"(?is)^\s*select\b", sql)) and not re.search(r"(?i)\b(count|sum|avg|group\s+by)\b", sql)
     true_total = None
     if is_list:
-        base = re.sub(r"(?is)\s+limit\s+\d+\s*;?\s*$", "", sql).rstrip(";")
+        base = sql.rstrip(";").strip()
+        # remove ANY trailing LIMIT ... (and optional OFFSET), wherever it appears at the end
+        base = re.sub(r"(?is)\s+limit\s+\d+(\s+offset\s+\d+)?\s*$", "", base)
+        # also remove a trailing ORDER BY (not needed for a count, and can break the subquery)
+        base_for_count = re.sub(r"(?is)\s+order\s+by\s+.*$", "", base)
         try:
-            cdf = run_sql(f"SELECT COUNT(*) AS n FROM ({base})")
+            cdf = run_sql(f"SELECT COUNT(*) AS n FROM ({base_for_count})")
             true_total = int(cdf.iloc[0]["n"])
         except Exception:
-            true_total = None
+            try:
+                cdf = run_sql(f"SELECT COUNT(*) AS n FROM ({base})")
+                true_total = int(cdf.iloc[0]["n"])
+            except Exception:
+                true_total = None
     try: df=run_sql(sql)
     except Exception as e: return f"Query failed: {e}\nSQL:\n{sql}"
     ART["table"]=df
