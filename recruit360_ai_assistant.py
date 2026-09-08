@@ -120,9 +120,12 @@ def query_recruitment_data(question: str) -> str:
     """Answer ANY analytical or lookup question about Recruit360 — candidates, visas, billing,
     training, jobs, placements. Handles counts, totals, filters, joins and lookups. Main data tool."""
     _trace("Conversational/Reporting")
+    # Detect a "show all / list all / everyone" style request -> allow a much bigger list
+    want_all = bool(re.search(r"\b(show all|list all|all of them|everyone|every candidate|full list|show more|all candidates)\b", question.lower()))
+    list_limit = 200 if want_all else 15
     prompt=(f"Write ONE efficient BigQuery SELECT (only SQL, no fences).\n"
             f"Rules for accuracy:\n"
-            f"- Select ONLY the columns needed (never SELECT *). For list questions add LIMIT 10.\n"
+            f"- Select ONLY the columns needed (never SELECT *). For list questions add LIMIT {list_limit}.\n"
             f"- Use COUNT/SUM/AVG for totals; use GROUP BY for 'per', 'by', 'each', 'breakdown' questions.\n"
             f"- Use ORDER BY ... DESC and LIMIT for 'top', 'most', 'highest', 'which ... most' questions.\n"
             f"- For text filters (role, city, status, country) use LOWER(col) LIKE LOWER('%value%') for case-insensitivity.\n"
@@ -138,9 +141,15 @@ def query_recruitment_data(question: str) -> str:
         return (f"No records match this request in the database. "
                 f"There are zero results for: {question}. "
                 f"Do not invent any — the correct answer is that none were found.\n\nSQL:\n{sql}")
-    shown = df.head(8)
-    note = "" if len(df) <= 8 else f"\n\n(Showing 8 of {len(df)} — full list is in the result table below.)"
-    return f"Result ({len(df)} found):\n{shown.to_string(index=False)}{note}"
+    # How many to show in the text answer
+    show_n = 25 if want_all else 8
+    shown = df.head(show_n)
+    total = len(df)
+    if total <= show_n:
+        note = ""
+    else:
+        note = f"\n\n(Showing {show_n} of {total} here — the complete list of {total} is in the results table below.)"
+    return f"Result ({total} found):\n{shown.to_string(index=False)}{note}"
 
 @tool
 def visa_fix_it(candidate_id: str) -> str:
